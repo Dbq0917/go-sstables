@@ -10,9 +10,9 @@ import (
 )
 
 // dontCacheFile keeps the written data out of the page cache. It writes with RWF_DONTCACHE (uncached buffered IO),
-// where the kernel drops the written pages once they are written back. Filesystems that don't support it (e.g. btrfs
-// before Linux 7.3, or kernels before 6.14) reject the first write with it. From then on, the file writes without the
-// flag and Sync evicts the synced pages instead.
+// where the kernel drops the written pages once they are written back. Filesystems that don't support it (e.g. btrfs)
+// and kernels before 6.14 reject the first write with it. From then on, the file writes without the flag and Sync
+// evicts the synced pages instead.
 type dontCacheFile struct {
 	*os.File
 	fd int

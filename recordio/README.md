@@ -197,7 +197,7 @@ if err != nil { log.Fatalf("error: %v", err) }
 ```
 
 On Linux, the data is written with `RWF_DONTCACHE` (uncached buffered IO) where the filesystem supports it, the kernel
-then drops the pages once they are written back. Otherwise, for example on btrfs before Linux 7.3, the writer falls back
+then drops the pages once they are written back. Otherwise, for example on btrfs, the writer falls back
 to evicting the pages with `posix_fadvise(POSIX_FADV_DONTNEED)` after every sync (`WriteSync` and `Close`). Between two
 syncs, the written data is thus still in the page cache. On other platforms, the option has no effect.
 
