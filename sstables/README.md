@@ -110,6 +110,7 @@ reader, err := sstables.NewSSTableReader(
 This allows you to trade-off several factors, here's the current available set of index loaders:
 * SkipListIndexLoader - current default, loads slowly, high memory usage, quick range scans, O(log n) key lookups
 * SliceKeyIndexLoader - loads quickly, compact but high memory usage, quick range scans, O(log n) key lookups
+* SparseKeyIndexLoader - loads quickly, configurable low memory usage (only every `Interval`-th entry is kept in memory, the rest is read from the index file on demand), quick range scans, O(log n) key lookups plus a bounded scan of at most `Interval` index records
 * MapKeyIndexLoader - loads quickly, very high memory usage, quick range scans, O(1) amortized key lookups
 * DiskIndexLoader (EXPERIMENTAL and under further development) - loads instantly, no additional memory usage, slow range scans, slow key lookups
 

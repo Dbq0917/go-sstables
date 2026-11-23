@@ -148,6 +148,28 @@ latency of `Get` on random keys.
 
 The disk index doesn't load anything upfront, but needs to read the index from disk on every `Get`.
 
+### Index granularity (sparse index)
+
+A 10 GB SSTable (8.94 mio. records of 1 KB values, 418 MB index file) comparing how much heap the loaded index
+occupies against the random read latency. The `SparseKeyIndexLoader` keeps only every `Interval`-th index entry in
+memory and resolves the remaining entries from the (memory mapped) index file on demand:
+
+| Index loader         | Index heap | Index load | Random read |
+|----------------------|------------|------------|-------------|
+| slice (all in memory)| 546 MB     | 1975 ms    | 317 µs      |
+| sparse, interval 16  | 30 MB      | 1716 ms    | 244 µs      |
+| sparse, interval 64  | 7.5 MB     | 1623 ms    | 190 µs      |
+| sparse, interval 256 | 1.9 MB     | 1898 ms    | 165 µs      |
+| disk (nothing)       | ~0 MB      | 3 ms       | 102 µs      |
+
+The random read latency is dominated by reading the 1 KB value from the data file, so trading in-memory index
+entries for a bounded on-disk index scan (interval 16-64) reduces the index heap by one to two orders of magnitude
+without a measurable read slowdown. Reproduce with:
+
+```bash
+go test -run='^$' -bench=BenchmarkSSTableSparseIndexRandomRead10G ./benchmark
+```
+
 ### Random reads
 
 `Get` on random keys with the default index loader. The page cache is only dropped once before the run, it warms up

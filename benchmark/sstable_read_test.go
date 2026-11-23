@@ -43,6 +43,7 @@ var loadTypeBenchmarks = []struct {
 		ReadBufferSize: 4096,
 	}},
 	{"slice", &sstables.SliceKeyIndexLoader{ReadBufferSize: 4096}},
+	{"sparse", &sstables.SparseKeyIndexLoader{Interval: 16}},
 	{"map", &sstables.MapKeyIndexLoader[[20]byte]{ReadBufferSize: 4096, Mapper: &sstables.Byte20KeyMapper{}}},
 	{"disk", &sstables.DiskIndexLoader{}},
 }

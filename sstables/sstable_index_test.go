@@ -24,6 +24,13 @@ var indexLoaders = []func() IndexLoader{
 		return &DiskIndexLoader{}
 	},
 	func() IndexLoader {
+		return &SparseKeyIndexLoader{Interval: 2}
+	},
+	func() IndexLoader {
+		// interval larger than the number of records, only the first record stays in memory
+		return &SparseKeyIndexLoader{Interval: 100}
+	},
+	func() IndexLoader {
 		return &MapKeyIndexLoader[[4]byte]{
 			ReadBufferSize: 4096,
 			Mapper:         &Byte4KeyMapper{},
