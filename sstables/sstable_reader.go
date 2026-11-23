@@ -94,7 +94,8 @@ func (reader *SSTableReader) getValueAtOffset(iVal IndexVal, skipHashCheck bool)
 		}
 	}
 
-	if skipHashCheck {
+	// A zero checksum means the index predates checksums, there is nothing to verify.
+	if skipHashCheck || iVal.Checksum == 0 {
 		return v, nil
 	}
 
@@ -104,11 +105,6 @@ func (reader *SSTableReader) getValueAtOffset(iVal IndexVal, skipHashCheck bool)
 	}
 
 	if valChecksum != iVal.Checksum {
-		// this mismatch could come from default values, reading older formats
-		if iVal.Checksum == 0 {
-			return v, nil
-		}
-
 		return v, fmt.Errorf("error in sstable '%s' while hashing value at offset [%d]: %w",
 			reader.opts.basePath, iVal.Offset, ChecksumError{valChecksum, iVal.Checksum})
 	}
@@ -237,14 +233,10 @@ func (reader *SSTableReader) validateDataFile() error {
 	return nil
 }
 
-func checksumValue(value []byte) (uint64, error) {
-	crc := crc64.New(crc64.MakeTable(crc64.ISO))
-	_, err := crc.Write(value)
-	if err != nil {
-		return 0, err
-	}
+var checksumTable = crc64.MakeTable(crc64.ISO)
 
-	return crc.Sum64(), nil
+func checksumValue(value []byte) (uint64, error) {
+	return crc64.Checksum(value, checksumTable), nil
 }
 
 // NewSSTableReader creates a new reader. The sstable base path is mandatory:
@@ -253,10 +245,11 @@ func checksumValue(value []byte) (uint64, error) {
 func NewSSTableReader(readerOptions ...ReadOption) (SSTableReaderI, error) {
 	opts := &SSTableReaderOptions{
 		basePath: "",
-		// by default, we validate the integrity on loading and never checking when reading.
-		// Other use cases might want to rather check the integrity at runtime while reading key / value pairs.
+		// We validate the integrity on load and on every value read. The read check only hashes the value that is
+		// actually returned, so later corruption (for example a bad disk block) is still detected without scanning
+		// the whole table again for each lookup.
 		skipHashCheckOnLoad: false,
-		skipHashCheckOnRead: true,
+		skipHashCheckOnRead: false,
 		readBufferSizeBytes: 4 * 1024 * 1024,
 	}
 
@@ -412,7 +405,8 @@ func ReadWithKeyComparator(cmp skiplist.Comparator[[]byte]) ReadOption {
 	}
 }
 
-// SkipHashCheckOnLoad will not check hashes against data read from the datafile when loading.
+// SkipHashCheckOnLoad will not check hashes against data read from the datafile when loading. Hash checks on reads
+// remain enabled unless SkipHashCheckOnReads is passed as well.
 func SkipHashCheckOnLoad() ReadOption {
 	return func(args *SSTableReaderOptions) {
 		args.skipHashCheckOnLoad = true
@@ -420,10 +414,18 @@ func SkipHashCheckOnLoad() ReadOption {
 }
 
 // EnableHashCheckOnReads will check data integrity everywhere the value is retrieved, e.g. when getting and scanning.
-// This is off by default, in favor of checking the data integrity during load time.
+// This is the default, the option is kept for explicitness and compatibility.
 func EnableHashCheckOnReads() ReadOption {
 	return func(args *SSTableReaderOptions) {
 		args.skipHashCheckOnRead = false
+	}
+}
+
+// SkipHashCheckOnReads disables checking data integrity when a value is retrieved. This trades the ability to detect
+// corruption introduced after the reader was opened for lower per-read CPU usage.
+func SkipHashCheckOnReads() ReadOption {
+	return func(args *SSTableReaderOptions) {
+		args.skipHashCheckOnRead = true
 	}
 }
 

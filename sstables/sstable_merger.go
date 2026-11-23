@@ -19,7 +19,7 @@ func (s SSTableMergeIteratorContext) Next() ([]byte, []byte, error) {
 	if errors.Is(err, Done) {
 		return nil, nil, pq.Done
 	}
-	return k, v, nil
+	return k, v, err
 }
 
 func (s SSTableMergeIteratorContext) Context() int {

@@ -89,7 +89,8 @@ func (it *SSTableFullScanIterator) Next() ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 
-	if it.skipHashCheck {
+	// A zero checksum means the index predates checksums, there is nothing to verify.
+	if it.skipHashCheck || iVal.Checksum == 0 {
 		return key, next, nil
 	}
 
@@ -99,11 +100,6 @@ func (it *SSTableFullScanIterator) Next() ([]byte, []byte, error) {
 	}
 
 	if checksum != iVal.Checksum {
-		// this mismatch could come from default values, reading older formats
-		if iVal.Checksum == 0 {
-			return key, next, nil
-		}
-
 		return key, next, ChecksumError{checksum, iVal.Checksum}
 	}
 

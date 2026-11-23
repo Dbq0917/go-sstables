@@ -47,6 +47,27 @@ func TestSuperSimpleHappyPathReadRecordIOV2(t *testing.T) {
 	assertContentMatchesSkipList(t, reader, skipListMap)
 }
 
+func TestSuperReaderScanPropagatesChecksumError(t *testing.T) {
+	reader, err := NewSSTableReader(
+		ReadBasePath("test_files/SimpleWriteHappyPathSSTableWithCRCHashesMismatch"),
+		ReadWithKeyComparator(skiplist.BytesComparator{}),
+		SkipHashCheckOnLoad())
+	require.Nil(t, err)
+	defer closeReader(t, reader)
+
+	superReader := NewSuperSSTableReader([]SSTableReaderI{reader}, skiplist.BytesComparator{})
+	it, err := superReader.Scan()
+	require.Nil(t, err)
+
+	for {
+		_, _, err = it.Next()
+		if err != nil {
+			break
+		}
+	}
+	require.ErrorIs(t, err, ChecksumError{})
+}
+
 func TestSuperSimpleHappyPathReadRecordIOV2Overlapping(t *testing.T) {
 	reader1, err := NewSSTableReader(
 		ReadBasePath("test_files/SimpleWriteHappyPathSSTableRecordIOV2"),

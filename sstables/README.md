@@ -95,6 +95,13 @@ for {
 
 You can get the full example from [examples/sstables.go](/_examples/sstables.go).
 
+### Checksums
+
+Every value is written with a CRC64 checksum in the index. By default, the reader verifies that checksum for each
+value it returns (through `Get` and the scan iterators), so corruption that appears after the table was opened is
+reported as a `ChecksumError` instead of being returned as data. Only the value being read is hashed, not the whole
+table. If you prefer lower per-read CPU usage and accept unverified values, pass `sstables.SkipHashCheckOnReads()`.
+
 ### Index Types
 
 Recently, we have been introducing different types of indices to facilitate faster loading and lookup times. You can now supply a `loader` when creating a reader using:

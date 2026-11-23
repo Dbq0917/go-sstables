@@ -3,7 +3,6 @@ package sstables
 import (
 	"errors"
 	"fmt"
-	"hash/crc64"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -118,8 +117,7 @@ func (writer *SSTableStreamWriter) WriteNext(key []byte, value []byte) error {
 		writer.bloomFilter.Add(fnvHash)
 	}
 
-	crc := crc64.New(crc64.MakeTable(crc64.ISO))
-	_, err := crc.Write(value)
+	checksum, err := checksumValue(value)
 	if err != nil {
 		return fmt.Errorf("error while writing crc64 hash in '%s': %w", writer.opts.basePath, err)
 	}
@@ -130,7 +128,7 @@ func (writer *SSTableStreamWriter) WriteNext(key []byte, value []byte) error {
 		return fmt.Errorf("error writeNext data writer error in '%s': %w", writer.opts.basePath, err)
 	}
 
-	_, err = writer.indexWriter.Write(&sProto.IndexEntry{Key: key, ValueOffset: recordOffset, Checksum: crc.Sum64()})
+	_, err = writer.indexWriter.Write(&sProto.IndexEntry{Key: key, ValueOffset: recordOffset, Checksum: checksum})
 	if err != nil {
 		// in case of failures we need to try to rewind the data writer's offset to preWriteOffset
 		seekErr := writer.dataWriter.Seek(preWriteOffset)

@@ -5,6 +5,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thomasjungblut/go-sstables/skiplist"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -159,6 +161,91 @@ func TestCRCHashMismatchErrorSkipEntirelyReadChecks(t *testing.T) {
 	}
 	require.Equal(t, 3, i)
 
+}
+
+func TestCRCHashMismatchDetectedOnReadByDefault(t *testing.T) {
+	reader, err := NewSSTableReader(
+		ReadBasePath("test_files/SimpleWriteHappyPathSSTableWithCRCHashesMismatch"),
+		ReadWithKeyComparator(skiplist.BytesComparator{}),
+		SkipHashCheckOnLoad(),
+	)
+	require.Nil(t, err)
+	defer closeReader(t, reader)
+
+	for _, i := range []int{1, 2, 3, 5, 6, 7} {
+		get, err := reader.Get(intToByteSlice(i))
+		require.Nil(t, err)
+		require.Equal(t, intToByteSlice(i+1), get)
+	}
+
+	_, err = reader.Get(intToByteSlice(4))
+	require.ErrorIs(t, err, ChecksumError{})
+	require.ErrorContains(t, err, "offset [41]: Checksum mismatch")
+
+	it, err := reader.Scan()
+	require.Nil(t, err)
+	for i := 0; i < 3; i++ {
+		_, _, err = it.Next()
+		require.Nil(t, err)
+	}
+	_, _, err = it.Next()
+	require.ErrorIs(t, err, ChecksumError{})
+}
+
+func TestSkipHashCheckOnReadsAllowsSkippingVerification(t *testing.T) {
+	reader, err := NewSSTableReader(
+		ReadBasePath("test_files/SimpleWriteHappyPathSSTableWithCRCHashesMismatch"),
+		ReadWithKeyComparator(skiplist.BytesComparator{}),
+		SkipHashCheckOnLoad(),
+		SkipHashCheckOnReads(),
+	)
+	require.Nil(t, err)
+	defer closeReader(t, reader)
+
+	get, err := reader.Get(intToByteSlice(4))
+	require.Nil(t, err)
+	require.Equal(t, intToByteSlice(0x15), get)
+}
+
+func TestCRCHashMismatchDetectedAfterReaderWasOpened(t *testing.T) {
+	basePath := copySSTableDir(t, "test_files/SimpleWriteHappyPathSSTableWithCRCHashes")
+
+	reader, err := NewSSTableReader(
+		ReadBasePath(basePath),
+		ReadWithKeyComparator(skiplist.BytesComparator{}),
+	)
+	require.Nil(t, err)
+	defer closeReader(t, reader)
+
+	get, err := reader.Get(intToByteSlice(4))
+	require.Nil(t, err)
+	require.Equal(t, intToByteSlice(5), get)
+
+	// simulate a bad disk block that appears after the reader was opened
+	dataFile, err := os.OpenFile(filepath.Join(basePath, DataFileName), os.O_RDWR, 0)
+	require.Nil(t, err)
+	_, err = dataFile.WriteAt([]byte{0x15}, 51)
+	require.Nil(t, err)
+	require.Nil(t, dataFile.Close())
+
+	get, err = reader.Get(intToByteSlice(4))
+	require.ErrorIs(t, err, ChecksumError{})
+	require.Equal(t, intToByteSlice(0x15), get)
+}
+
+func copySSTableDir(t *testing.T, source string) string {
+	target := t.TempDir()
+	entries, err := os.ReadDir(source)
+	require.Nil(t, err)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		require.Nil(t, err)
+		require.Nil(t, os.WriteFile(filepath.Join(target, entry.Name()), content, 0666))
+	}
+	return target
 }
 
 func TestCRCHashEmptyValues(t *testing.T) {
