@@ -244,7 +244,7 @@ func NewSSTableStreamWriter(writerOptions ...WriterOption) (*SSTableStreamWriter
 		basePath:                      "",
 		enableBloomFilter:             true,
 		indexCompressionType:          recordio.CompressionTypeNone,
-		dataCompressionType:           recordio.CompressionTypeSnappy,
+		dataCompressionType:           recordio.CompressionTypeNone, // hot tier: avoid decompression on random reads
 		bloomFpProbability:            0.01,
 		bloomExpectedNumberOfElements: 1000,
 		writeBufferSizeBytes:          1024 * 1024 * 4,
@@ -307,6 +307,9 @@ func IndexCompressionType(p int) WriterOption {
 	}
 }
 
+// DataCompressionType selects compression for a table's values. Tables on the hot
+// write/read path should stay uncompressed (the default); cold tables such as
+// compaction output can use Snappy or another supported codec.
 func DataCompressionType(p int) WriterOption {
 	return func(args *SSTableWriterOptions) {
 		args.dataCompressionType = p

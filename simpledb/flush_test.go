@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thomasjungblut/go-sstables/memstore"
+	"github.com/thomasjungblut/go-sstables/recordio"
 	"github.com/thomasjungblut/go-sstables/skiplist"
 )
 
@@ -50,6 +51,9 @@ func TestFlushHappyPath(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 	_, err = os.Stat(filepath.Join(tmpDir, "sstable_000000000000043"))
 	assert.Nil(t, err)
+	assert.Equal(t,
+		recordio.CompressionTypeNone,
+		testReadDataCompressionType(t, filepath.Join(tmpDir, fmt.Sprintf(SSTablePattern, 43))))
 
 	assert.Nil(t, db.sstableManager.currentReader.Close())
 }

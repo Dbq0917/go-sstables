@@ -10,6 +10,7 @@ import (
 
 	"github.com/thomasjungblut/go-sstables/internal/fsutil"
 	"github.com/thomasjungblut/go-sstables/memstore"
+	"github.com/thomasjungblut/go-sstables/recordio"
 	"github.com/thomasjungblut/go-sstables/sstables"
 )
 
@@ -53,7 +54,10 @@ func executeFlush(db *DB, flushAction memStoreFlushAction) error {
 		sstables.WriteBasePath(writePath),
 		sstables.WithKeyComparator(db.cmp),
 		sstables.WriteBufferSizeBytes(int(db.writeBufferSizeBytes)),
-		sstables.BloomExpectedNumberOfElements(numElements))
+		sstables.BloomExpectedNumberOfElements(numElements),
+		// L0 is the hot read/write tier. Keep it uncompressed so random reads do
+		// not pay decompression while the data is still active.
+		sstables.DataCompressionType(recordio.CompressionTypeNone))
 	if err != nil {
 		return err
 	}

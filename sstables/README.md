@@ -39,6 +39,21 @@ if err != nil { log.Fatalf("error: %v", err) }
 
 Keep in mind that streaming data requires a comparator (for safety), which will error on writes that are out of order.
 
+### Compression
+
+Fresh SSTables are treated as the hot tier and store their values uncompressed by default. This keeps random `Get`
+calls off the decompression path while the table is being written and read heavily. Cold data, such as compaction
+output, can opt into compression:
+
+```go
+writer, err := sstables.NewSSTableStreamWriter(
+    sstables.WriteBasePath(path),
+    sstables.WithKeyComparator(skiplist.BytesComparator{}),
+    sstables.DataCompressionType(recordio.CompressionTypeSnappy))
+```
+
+The tier is selected when a table is written; no per-block access counters are required.
+
 Since that is somewhat cumbersome, you can also directly write a full skip list using the `SimpleWriter`:
 
 ```go

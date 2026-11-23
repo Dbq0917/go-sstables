@@ -4,16 +4,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thomasjungblut/go-sstables/internal/testutil"
 	"github.com/thomasjungblut/go-sstables/recordio"
 	"github.com/thomasjungblut/go-sstables/skiplist"
-	"math/rand"
-	"os"
-	"reflect"
-	"sort"
-	"testing"
 )
 
 func TestReadSkipListWriteEndToEnd(t *testing.T) {
@@ -52,15 +55,24 @@ func TestReadStreamedWriteEndToEndCheckMetadata(t *testing.T) {
 	// check the metadata is accurate
 	assert.Equal(t, 1, int(reader.MetaData().Version))
 	assert.Equal(t, len(expectedNumbers), int(reader.MetaData().NumRecords))
-	assert.Equal(t, 17008, int(reader.MetaData().DataBytes))
+	// the default writer keeps hot data uncompressed
+	assert.Equal(t, 15008, int(reader.MetaData().DataBytes))
 	// depending on how well protobuf can vint compress the checksums, we end up with more or less bytes
 	assert.InDelta(t, 30515, int(reader.MetaData().IndexBytes), 1024)
-	assert.InDelta(t, 47523, int(reader.MetaData().TotalBytes), 1024)
+	assert.InDelta(t, 45502, int(reader.MetaData().TotalBytes), 1024)
 	assert.Equal(t, intToByteSlice(expectedNumbers[0]), reader.MetaData().MinKey)
 	assert.Equal(t, intToByteSlice(expectedNumbers[len(expectedNumbers)-1]), reader.MetaData().MaxKey)
 }
 
-// this is implicitly covered by the above tests already since it's a default
+func TestDefaultWriterKeepsHotDataUncompressed(t *testing.T) {
+	writer, err := newTestSSTableStreamWriter()
+	require.NoError(t, err)
+	defer cleanWriterDir(t, writer)
+
+	streamedWrite1kElements(t, writer)
+	assert.Equal(t, recordio.CompressionTypeNone, testReadDataCompressionType(t, writer.opts.basePath))
+}
+
 func TestReadStreamedWriteEndToEndDataCompressionSnappy(t *testing.T) {
 	writer, err := newTestSSTableStreamWriterWithDataCompression(recordio.CompressionTypeSnappy)
 	require.Nil(t, err)
@@ -389,4 +401,15 @@ func intToByteSlice(e int) []byte {
 	key := make([]byte, 4)
 	binary.BigEndian.PutUint32(key, uint32(e))
 	return key
+}
+
+func testReadDataCompressionType(t *testing.T, sstablePath string) int {
+	f, err := os.Open(filepath.Join(sstablePath, DataFileName))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, f.Close()) }()
+
+	header := make([]byte, recordio.FileHeaderSizeBytes)
+	_, err = io.ReadFull(f, header)
+	require.NoError(t, err)
+	return int(binary.LittleEndian.Uint32(header[4:8]))
 }

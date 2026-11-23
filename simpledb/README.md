@@ -122,6 +122,10 @@ In SimpleDB only L0 is implemented, meaning there are multiple SSTables at the s
 ranges. There is a maximum limit of ten simultaneous SSTables, after that limit an asynchronous compaction and merge
 process will kick off and merge into a single SSTable again.
 
+Newly flushed L0 SSTables are the hot tier and keep values uncompressed to avoid decompression on random reads.
+Compaction output is the cold tier and uses Snappy compression. This is a table-age policy and does not require
+tracking access counts for individual blocks.
+
 The only difference is that there is no manifest log, the purpose of this tracking is delegated to the filesystem mainly
 using path patterns and conventions.
 

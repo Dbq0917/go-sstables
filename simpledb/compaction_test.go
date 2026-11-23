@@ -1,13 +1,16 @@
 package simpledb
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thomasjungblut/go-sstables/memstore"
+	"github.com/thomasjungblut/go-sstables/recordio"
 	"github.com/thomasjungblut/go-sstables/sstables"
 	"github.com/thomasjungblut/go-sstables/sstables/proto"
 )
@@ -44,6 +47,7 @@ func TestExecCompactionSameContent(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, "sstable_000000000000042", compactionMeta.ReplacementPath)
 	assert.Equal(t, []string{"sstable_000000000000042", "sstable_000000000000043"}, compactionMeta.SstablePaths)
+	assert.Equal(t, recordio.CompressionTypeSnappy, testReadDataCompressionType(t, filepath.Join(db.basePath, compactionMeta.WritePath)))
 
 	v, err := db.Get("hello")
 	assert.Nil(t, err)
@@ -218,4 +222,15 @@ func writeEmptySSTableInDatabaseFolder(t *testing.T, db *DB, p string) {
 		sstables.WriteBasePath(fakeTablePath),
 		sstables.WithKeyComparator(db.cmp),
 	))
+}
+
+func testReadDataCompressionType(t *testing.T, sstablePath string) int {
+	f, err := os.Open(filepath.Join(sstablePath, sstables.DataFileName))
+	assert.NoError(t, err)
+	defer func() { assert.NoError(t, f.Close()) }()
+
+	header := make([]byte, recordio.FileHeaderSizeBytes)
+	_, err = io.ReadFull(f, header)
+	assert.NoError(t, err)
+	return int(binary.LittleEndian.Uint32(header[4:8]))
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thomasjungblut/go-sstables/recordio"
 	rProto "github.com/thomasjungblut/go-sstables/recordio/proto"
 	"github.com/thomasjungblut/go-sstables/simpledb/proto"
 	"github.com/thomasjungblut/go-sstables/skiplist"
@@ -76,7 +77,10 @@ func executeCompaction(db *DB) (compactionMetadata *proto.CompactionMetadata, er
 	writer, err := sstables.NewSSTableStreamWriter(
 		sstables.WriteBasePath(writeFolder),
 		sstables.WithKeyComparator(skiplist.BytesComparator{}),
-		sstables.BloomExpectedNumberOfElements(numRecords))
+		sstables.BloomExpectedNumberOfElements(numRecords),
+		// Compaction output is the cold tier: it is no longer rewritten often and is
+		// primarily scanned or read from archive, so trade decode CPU for disk space.
+		sstables.DataCompressionType(recordio.CompressionTypeSnappy))
 	if err != nil {
 		return nil, err
 	}
