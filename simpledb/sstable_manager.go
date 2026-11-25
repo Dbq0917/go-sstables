@@ -30,22 +30,11 @@ func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) er
 		defer s.databaseLock.Unlock()
 		defer s.managerLock.Unlock()
 
-		// the compaction folder must be durable before the sstables it replaces are removed
-		err := fsutil.SyncDir(s.basePath)
-		if err != nil {
-			return err
-		}
-
+		// close the readers of the sstables that are about to be replaced
 		for _, p := range m.SstablePaths {
 			i := indexOfReader(s.allSSTableReaders, p)
 			if i >= 0 {
 				err := s.allSSTableReaders[i].Close()
-				if err != nil {
-					return err
-				}
-				// this is actually a "neuralgic" point in terms of recovery, we know that the SSTable backed by newReader
-				// contains the whole data of all the SSTables we're about to remove. So it's safe to delete them here.
-				err = os.RemoveAll(filepath.Join(s.basePath, p))
 				if err != nil {
 					return err
 				}
@@ -55,9 +44,24 @@ func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) er
 		// this is another important step in the recovery process, we need to ensure the ordering is preserved in case of crashes and
 		// thus replace the very first written SSTable in the path set. This creates a couple of "holes" in the numbering schema of
 		// the SSTables, but we guarantee that the compaction is in the right place.
-		err = os.Rename(filepath.Join(s.basePath, m.WritePath), filepath.Join(s.basePath, m.ReplacementPath))
+		// the swap is re-entrant and never touches the old sstable before the compacted one is durable in its
+		// place, so a crash at any point leaves a state behind that recovery can finish or roll back.
+		err := swapDirectory(s.basePath,
+			filepath.Join(s.basePath, m.WritePath),
+			filepath.Join(s.basePath, m.ReplacementPath))
 		if err != nil {
 			return err
+		}
+
+		// this is actually a "neuralgic" point in terms of recovery, we know that the SSTable that was just
+		// swapped in contains the whole data of all the SSTables we're about to remove. So it's safe to delete them here.
+		for _, p := range m.SstablePaths {
+			if p != m.ReplacementPath {
+				err = os.RemoveAll(filepath.Join(s.basePath, p))
+				if err != nil {
+					return err
+				}
+			}
 		}
 
 		err = fsutil.SyncDir(s.basePath)

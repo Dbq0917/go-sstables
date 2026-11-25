@@ -189,6 +189,117 @@ func TestRecoveryWALHappyPath(t *testing.T) {
 	assert.Equal(t, "world", v)
 }
 
+func TestRecoveryInterruptedCompactionSwapRolledForward(t *testing.T) {
+	db := newOpenedSimpleDB(t, "simpledb_recoveryInterruptedSwapRolledForward")
+	defer cleanDatabaseFolder(t, db)
+
+	// closing early so we can fake a crash in the middle of the swap
+	closeDatabase(t, db)
+	replacementTablePath := fmt.Sprintf(SSTablePattern, 1337)
+	compactionPath := fmt.Sprintf("%s-%d", SSTableCompactionPathPrefix, 1337)
+	absCompactionPath := filepath.Join(db.basePath, compactionPath)
+	writeSSTableInDatabaseFolder(t, db, compactionPath)
+	compMeta := &dbproto.CompactionMetadata{
+		WritePath:       compactionPath,
+		ReplacementPath: replacementTablePath,
+		SstablePaths:    []string{replacementTablePath},
+	}
+	assert.Nil(t, saveCompactionMetadata(absCompactionPath, compMeta))
+	// crash happened after the old sstable was moved aside, but before the new one was in place
+	writeSSTableInDatabaseFolder(t, db, replacementTablePath+SSTableTrashSuffix)
+
+	err := db.repairCompactions()
+	assert.Nil(t, err)
+	// the compacted sstable is in place, compaction folder and trash are gone
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath, sstables.IndexFileName))
+	assert.Nil(t, err)
+	_, err = os.Stat(absCompactionPath)
+	assert.Truef(t, os.IsNotExist(err), "%v", err)
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath+SSTableTrashSuffix))
+	assert.Truef(t, os.IsNotExist(err), "%v", err)
+
+	err = db.reconstructSSTables()
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(db.sstableManager.allSSTableReaders))
+
+	// just for the clean up to work
+	assert.Nil(t, db.sstableManager.currentReader.Close())
+}
+
+func TestRecoveryInterruptedCompactionSwapRolledBack(t *testing.T) {
+	db := newOpenedSimpleDB(t, "simpledb_recoveryInterruptedSwapRolledBack")
+	defer cleanDatabaseFolder(t, db)
+
+	// closing early so we can fake a crash in the middle of the swap
+	closeDatabase(t, db)
+	replacementTablePath := fmt.Sprintf(SSTablePattern, 1337)
+	// the compaction never made it (malformed folder without metadata), but the old
+	// sstable was already moved aside: it must be rolled back instead of lost
+	compactionPath := fmt.Sprintf("%s-%d", SSTableCompactionPathPrefix, 1337)
+	writeSSTableInDatabaseFolder(t, db, compactionPath)
+	writeSSTableInDatabaseFolder(t, db, replacementTablePath+SSTableTrashSuffix)
+
+	err := db.repairCompactions()
+	assert.Nil(t, err)
+	// the malformed compaction is deleted and the old sstable is back in its original place
+	_, err = os.Stat(filepath.Join(db.basePath, compactionPath))
+	assert.Truef(t, os.IsNotExist(err), "%v", err)
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath, sstables.IndexFileName))
+	assert.Nil(t, err)
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath+SSTableTrashSuffix))
+	assert.Truef(t, os.IsNotExist(err), "%v", err)
+
+	err = db.reconstructSSTables()
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(db.sstableManager.allSSTableReaders))
+
+	// just for the clean up to work
+	assert.Nil(t, db.sstableManager.currentReader.Close())
+}
+
+func TestRecoveryLeftoverTrashDeleted(t *testing.T) {
+	db := newOpenedSimpleDB(t, "simpledb_recoveryLeftoverTrashDeleted")
+	defer cleanDatabaseFolder(t, db)
+
+	// closing early so we can fake a crash after the swap completed
+	closeDatabase(t, db)
+	replacementTablePath := fmt.Sprintf(SSTablePattern, 1337)
+	writeSSTableInDatabaseFolder(t, db, replacementTablePath)
+	// the swap already put the new sstable in place, only deleting the old one was interrupted
+	writeSSTableInDatabaseFolder(t, db, replacementTablePath+SSTableTrashSuffix)
+
+	err := db.repairCompactions()
+	assert.Nil(t, err)
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath+SSTableTrashSuffix))
+	assert.Truef(t, os.IsNotExist(err), "%v", err)
+	_, err = os.Stat(filepath.Join(db.basePath, replacementTablePath, sstables.IndexFileName))
+	assert.Nil(t, err)
+
+	err = db.reconstructSSTables()
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(db.sstableManager.allSSTableReaders))
+
+	// just for the clean up to work
+	assert.Nil(t, db.sstableManager.currentReader.Close())
+}
+
+func TestRecoveryReconstructSkipsHalfFinishedDirectories(t *testing.T) {
+	db := newOpenedSimpleDB(t, "simpledb_recoveryReconstructSkipsHalfFinished")
+	defer cleanDatabaseFolder(t, db)
+	defer closeDatabase(t, db)
+
+	writeSSTableInDatabaseFolder(t, db, fmt.Sprintf(SSTablePattern, 1337))
+	// half-finished directories must not be loaded as live sstables, recovery and
+	// loading classify them the same way
+	writeSSTableInDatabaseFolder(t, db, fmt.Sprintf(SSTablePattern, 1338)+SSTableTrashSuffix)
+	writeSSTableInDatabaseFolder(t, db, fmt.Sprintf("%s-%d", SSTableCompactionPathPrefix, 1339))
+
+	err := db.reconstructSSTables()
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(db.sstableManager.allSSTableReaders))
+	assert.Equal(t, 1337, int(db.currentGeneration))
+}
+
 func createWALWithEntries(db *DB, mutations []*dbproto.WalMutation) error {
 	// close the current WAL to overwrite the state
 	err := db.wal.Close()

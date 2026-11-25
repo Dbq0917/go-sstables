@@ -26,12 +26,20 @@ func (db *DB) repairCompactions() error {
 	// If it was unsuccessful the whole folder is deleted and it can be attempted again.
 	var compactionsToFinish []*dbproto.CompactionMetadata
 	var compactionsToDelete []string
+	var trashDirs []string
 	err := filepath.Walk(db.basePath, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() && strings.HasPrefix(info.Name(), SSTableCompactionPathPrefix) {
+		if !info.IsDir() {
+			return nil
+		}
+
+		switch classifyDir(info.Name()) {
+		case dirClassTrash:
+			trashDirs = append(trashDirs, p)
+		case dirClassCompaction:
 			err := func() (err error) {
 				metaPath := filepath.Join(p, CompactionFinishedSuccessfulFileName)
 				_, err = os.Stat(metaPath)
@@ -91,17 +99,7 @@ func (db *DB) repairCompactions() error {
 		absReplacementPath := filepath.Join(db.basePath, meta.ReplacementPath)
 
 		log.Printf("finishing compaction in %s into %s", absWritePath, absReplacementPath)
-		err := os.RemoveAll(absReplacementPath)
-		if err != nil {
-			return err
-		}
-
-		err = os.Rename(absWritePath, absReplacementPath)
-		if err != nil {
-			return err
-		}
-
-		err = fsutil.SyncDir(db.basePath)
+		err := swapDirectory(db.basePath, absWritePath, absReplacementPath)
 		if err != nil {
 			return err
 		}
@@ -114,9 +112,41 @@ func (db *DB) repairCompactions() error {
 				}
 			}
 		}
+
+		err = fsutil.SyncDir(db.basePath)
+		if err != nil {
+			return err
+		}
 	}
 
-	return nil
+	// interrupted swaps can leave trash directories behind, even after their compaction
+	// metadata is gone. They are cleaned up or rolled back here, based on the same
+	// classification the loading path uses, so both always agree on the outcome.
+	for _, trashPath := range trashDirs {
+		if !dirExists(trashPath) {
+			// already cleaned up while finishing a compaction above
+			continue
+		}
+
+		replacementPath := strings.TrimSuffix(trashPath, SSTableTrashSuffix)
+		if dirExists(replacementPath) {
+			// the swap completed, only deleting the old directory was interrupted
+			log.Printf("deleting leftover trash directory in %v", trashPath)
+			err := os.RemoveAll(trashPath)
+			if err != nil {
+				return err
+			}
+		} else {
+			// the swap never completed, roll back to the original state
+			log.Printf("rolling back interrupted swap of %v", trashPath)
+			err := os.Rename(trashPath, replacementPath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return fsutil.SyncDir(db.basePath)
 }
 
 // this reads all existing sstables and adds them (if any), along with the generation number
@@ -128,7 +158,9 @@ func (db *DB) reconstructSSTables() error {
 			return err
 		}
 
-		if info.IsDir() && strings.HasPrefix(info.Name(), SSTablePrefix) {
+		// half-finished directories (compactions, trash) are classified exactly like in
+		// repairCompactions and must never be loaded as live sstables
+		if info.IsDir() && classifyDir(info.Name()) == dirClassSSTable {
 			tablePaths = append(tablePaths, path)
 		}
 
