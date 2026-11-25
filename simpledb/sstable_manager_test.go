@@ -1,6 +1,7 @@
 package simpledb
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -69,6 +70,96 @@ func TestSSTableCompactionReflectionHappyPath(t *testing.T) {
 	assert.Equal(t, 2, len(manager.allSSTableReaders))
 	assert.Equal(t, "1", filepath.Base(manager.allSSTableReaders[0].BasePath()))
 	assert.Equal(t, "3", filepath.Base(manager.allSSTableReaders[1].BasePath()))
+}
+
+// regression for sstables whose reader is not registered anymore (e.g. a crash mid-process or a failed registration
+// after a restart). The folders still exist on disk and must be deleted by path rather than skipped silently.
+func TestSSTableCompactionReflectionDeletesDiskFoldersWithoutReader(t *testing.T) {
+	dir := t.TempDir()
+	db := &DB{cmp: skiplist.BytesComparator{}, basePath: dir}
+
+	// real sstable folders on disk
+	writeSSTableInDatabaseFolder(t, db, "1")
+	writeSSTableInDatabaseFolder(t, db, "2")
+	writeSSTableInDatabaseFolder(t, db, "3")
+	const compactionOutputPath = "4"
+	writeSSTableInDatabaseFolder(t, db, compactionOutputPath)
+
+	manager := NewSSTableManager(skiplist.BytesComparator{}, &sync.RWMutex{}, dir)
+	// reader "2" has exited early and is not registered anymore, its folder must still be cleaned up
+	manager.addReader(&MockSSTableReader{metadata: &proto.MetaData{}, path: filepath.Join(dir, "1")})
+	manager.addReader(&MockSSTableReader{metadata: &proto.MetaData{}, path: filepath.Join(dir, "3")})
+
+	meta := &sdbProto.CompactionMetadata{
+		WritePath:       compactionOutputPath,
+		ReplacementPath: "1",
+		SstablePaths:    []string{"1", "2"},
+	}
+	err := manager.reflectCompactionResult(meta)
+	assert.Nil(t, err)
+
+	// the replacement folder was renamed into "1" after the old one was deleted
+	assert.DirExists(t, filepath.Join(dir, "1"))
+	assert.NoDirExists(t, filepath.Join(dir, "2"))
+	// "3" is still referenced and must survive
+	assert.DirExists(t, filepath.Join(dir, "3"))
+
+	// only the replacement and the untouched reader remain
+	assert.Equal(t, 2, len(manager.allSSTableReaders))
+	assert.Equal(t, "1", filepath.Base(manager.allSSTableReaders[0].BasePath()))
+	assert.Equal(t, "3", filepath.Base(manager.allSSTableReaders[1].BasePath()))
+	assert.Empty(t, manager.pendingDeletions)
+}
+
+// when an sstable cannot be removed (here its reader fails to close), the path must be remembered and retried on the
+// next compaction instead of leaking the folder forever.
+func TestSSTableCompactionReflectionRetriesFailedDeletions(t *testing.T) {
+	dir := t.TempDir()
+	db := &DB{cmp: skiplist.BytesComparator{}, basePath: dir}
+
+	writeSSTableInDatabaseFolder(t, db, "1")
+	writeSSTableInDatabaseFolder(t, db, "2")
+	const compactionOutputPath = "4"
+	writeSSTableInDatabaseFolder(t, db, compactionOutputPath)
+
+	manager := NewSSTableManager(skiplist.BytesComparator{}, &sync.RWMutex{}, dir)
+	manager.addReader(&MockSSTableReader{metadata: &proto.MetaData{}, path: filepath.Join(dir, "1")})
+	failingReader := &MockSSTableReader{
+		metadata: &proto.MetaData{},
+		path:     filepath.Join(dir, "2"),
+		closeErr: errors.New("cannot close reader"),
+	}
+	manager.addReader(failingReader)
+
+	firstMeta := &sdbProto.CompactionMetadata{
+		WritePath:       compactionOutputPath,
+		ReplacementPath: "2",
+		SstablePaths:    []string{"1", "2"},
+	}
+	err := manager.reflectCompactionResult(firstMeta)
+	assert.ErrorContains(t, err, "cannot close reader")
+
+	// "1" was deleted before the failing reader was reached, "2" is now pending a retry
+	assert.NoDirExists(t, filepath.Join(dir, "1"))
+	assert.DirExists(t, filepath.Join(dir, "2"))
+	// the rename never happened because the deletion loop failed first
+	assert.DirExists(t, filepath.Join(dir, compactionOutputPath))
+	assert.Contains(t, manager.pendingDeletions, "2")
+	assert.True(t, failingReader.closed)
+
+	// the reader can now be closed, the next compaction retries the pending path before doing anything else
+	failingReader.closeErr = nil
+	secondMeta := &sdbProto.CompactionMetadata{
+		WritePath:       compactionOutputPath,
+		ReplacementPath: "2",
+		SstablePaths:    []string{},
+	}
+	err = manager.reflectCompactionResult(secondMeta)
+	assert.Nil(t, err)
+	// pending "1" was deleted and the output folder was then renamed into its place
+	assert.DirExists(t, filepath.Join(dir, "2"))
+	assert.NoDirExists(t, filepath.Join(dir, compactionOutputPath))
+	assert.Empty(t, manager.pendingDeletions)
 }
 
 func TestSSTableManagerSelectCompactionCandidates(t *testing.T) {
@@ -216,6 +307,10 @@ func TestFloodFill(t *testing.T) {
 type MockSSTableReader struct {
 	metadata *proto.MetaData
 	path     string
+	// closeErr is returned by Close until it is reset to nil, which simulates a reader that temporarily cannot be
+	// closed (e.g. while an operation is in flight).
+	closeErr error
+	closed   bool
 }
 
 func (m *MockSSTableReader) MetaData() *proto.MetaData {
@@ -243,7 +338,8 @@ func (m *MockSSTableReader) ScanRange(keyLower []byte, keyHigher []byte) (sstabl
 }
 
 func (m *MockSSTableReader) Close() error {
-	return nil
+	m.closed = true
+	return m.closeErr
 }
 
 func (m *MockSSTableReader) BasePath() string {

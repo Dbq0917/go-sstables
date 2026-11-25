@@ -1,6 +1,7 @@
 package simpledb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,10 @@ type SSTableManager struct {
 	managerLock       *sync.RWMutex
 	allSSTableReaders []sstables.SSTableReaderI
 	currentReader     sstables.SSTableReaderI
+	// pendingDeletions tracks relative sstable paths that could not be deleted yet (e.g. a reader failed to close or
+	// the RemoveAll call failed). The disk is the source of truth here: even sstables that are not represented by a
+	// registered reader are retried on the next compaction until they are physically gone.
+	pendingDeletions map[string]struct{}
 }
 
 func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) error {
@@ -36,19 +41,19 @@ func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) er
 			return err
 		}
 
+		// retry paths that failed to delete in a previous run before attempting the new deletions
+		err = s.deletePendingSSTables()
+		if err != nil {
+			return err
+		}
+
 		for _, p := range m.SstablePaths {
-			i := indexOfReader(s.allSSTableReaders, p)
-			if i >= 0 {
-				err := s.allSSTableReaders[i].Close()
-				if err != nil {
-					return err
-				}
-				// this is actually a "neuralgic" point in terms of recovery, we know that the SSTable backed by newReader
-				// contains the whole data of all the SSTables we're about to remove. So it's safe to delete them here.
-				err = os.RemoveAll(filepath.Join(s.basePath, p))
-				if err != nil {
-					return err
-				}
+			// the disk is the source of truth: the registered readers are a different source and may miss sstables
+			// (e.g. after a crash or a failed registration), so we delete by path and only close a reader when we
+			// actually have one registered. Anything still referenced by a reader is closed first.
+			err = s.deleteSSTable(p)
+			if err != nil {
+				return err
 			}
 		}
 
@@ -83,8 +88,9 @@ func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) er
 		for _, p := range m.SstablePaths {
 			if p != m.ReplacementPath {
 				readerIndex := indexOfReader(s.allSSTableReaders, p)
+				// readers and disk files are different sources, a path may not have a registered reader anymore
 				if readerIndex < 0 {
-					return fmt.Errorf("couldn't find sstable in current readers. Path: %v", p)
+					continue
 				}
 				s.allSSTableReaders = removeReaderAt(s.allSSTableReaders, readerIndex)
 			}
@@ -94,6 +100,57 @@ func (s *SSTableManager) reflectCompactionResult(m *proto.CompactionMetadata) er
 
 		return nil
 	}()
+}
+
+// deleteSSTable removes the sstable folder at the given relative path from disk. When a reader is still registered
+// for that path it is closed before the removal, so nothing referenced is deleted out from under an open reader.
+// Failures are remembered in pendingDeletions and retried on the next compaction reflection instead of leaving the
+// orphaned folder behind silently.
+func (s *SSTableManager) deleteSSTable(relativePath string) error {
+	absolutePath := filepath.Join(s.basePath, relativePath)
+
+	_, err := os.Stat(absolutePath)
+	if os.IsNotExist(err) {
+		// already gone, nothing to do and nothing to keep retrying
+		delete(s.pendingDeletions, relativePath)
+		return nil
+	} else if err != nil {
+		s.pendingDeletions[relativePath] = struct{}{}
+		return err
+	}
+
+	if readerIndex := indexOfReader(s.allSSTableReaders, relativePath); readerIndex >= 0 {
+		err = s.allSSTableReaders[readerIndex].Close()
+		if err != nil {
+			s.pendingDeletions[relativePath] = struct{}{}
+			return err
+		}
+	}
+
+	// this is actually a "neuralgic" point in terms of recovery, we know that the SSTable backed by the replacement
+	// reader contains the whole data of all the SSTables we're about to remove. So it's safe to delete them here.
+	err = os.RemoveAll(absolutePath)
+	if err != nil {
+		s.pendingDeletions[relativePath] = struct{}{}
+		return err
+	}
+
+	delete(s.pendingDeletions, relativePath)
+	return nil
+}
+
+// deletePendingSSTables retries the deletions that previously failed. It returns the first error encountered while
+// keeping the remaining pending paths for the next retry.
+func (s *SSTableManager) deletePendingSSTables() error {
+	var retErr error
+	for relativePath := range s.pendingDeletions {
+		err := s.deleteSSTable(relativePath)
+		if err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}
+
+	return retErr
 }
 
 func (s *SSTableManager) clearReaders() {
@@ -198,11 +255,12 @@ outer:
 
 func NewSSTableManager(cmp skiplist.Comparator[[]byte], dbLock *sync.RWMutex, basePath string) *SSTableManager {
 	return &SSTableManager{
-		cmp:           cmp,
-		managerLock:   &sync.RWMutex{},
-		databaseLock:  dbLock,
-		basePath:      basePath,
-		currentReader: sstables.EmptySStableReader{},
+		cmp:              cmp,
+		managerLock:      &sync.RWMutex{},
+		databaseLock:     dbLock,
+		basePath:         basePath,
+		currentReader:    sstables.EmptySStableReader{},
+		pendingDeletions: map[string]struct{}{},
 	}
 }
 
