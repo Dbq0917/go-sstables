@@ -71,6 +71,34 @@ err = reader.Close()
 if err != nil { log.Fatalf("error: %v", err) }
 ```
 
+`ReadNext` returns a slice owned by the caller. The reader does not keep a reference to it and never reuses its
+backing memory, so the slice stays readable after subsequent reads and after `Close`, and it can be handed to another
+goroutine. A `FileReader` itself must still only be read by one goroutine at a time.
+
+To avoid per-record allocations in sequential scans, `ReadNextInto` reads the record into a caller-provided buffer
+when it has enough capacity. It returns a slice that aliases that buffer; if another goroutine is still using the
+previous result, wait until it is done before reusing the same buffer:
+
+```go
+readerInto := reader.(recordio.ReaderIntoI)
+var buf []byte
+for {
+    buf, err = readerInto.ReadNextInto(buf[:0])
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        log.Fatalf("error: %v", err)
+    }
+
+    // process buf before the next ReadNextInto call
+}
+```
+
+The reader never owns or releases a buffer passed to `ReadNextInto`; its lifetime remains with the caller (and the Go
+garbage collector). Reusing a buffer overwrites the previous result, but does not invalidate any other buffer obtained
+from `ReadNext` or from a call with a different backing array.
+
 ## Using Proto RecordIO
 
 Reading and writing a `recordio` file using Protobuf and snappy compression can be done quite easily with the below sections. Here's the simple proto file we use:
@@ -177,7 +205,21 @@ log.Printf("Reading message at offset 8: %s", record.GetMessage())
 
 err = reader.Close()
 if err != nil { log.Fatalf("error: %v", err) }
-``` 
+```
+
+The mmap reader's ordinary `ReadNextAt` also returns independently owned slices. For uncompressed v4 records,
+`ReadNextAtView` can return a zero-copy view directly into the mapped file. Views are read-only and only valid until
+`Close`; calls return distinct ranges, so they can be passed to other goroutines while the reader stays open:
+
+```go
+viewReader := reader.(recordio.ReadAtViewI)
+recordBytes, err := viewReader.ReadNextAtView(8)
+if err != nil { log.Fatalf("error: %v", err) }
+
+// read recordBytes while the mmap reader is open, never modify it
+```
+
+Use `ReadNextAt` or `ReadNextAtInto` when the bytes must outlive the reader or need to be modified.
 
 You can get the full example from [examples/recordio.go](/_examples/recordio.go).
 

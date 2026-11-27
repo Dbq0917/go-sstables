@@ -79,6 +79,43 @@ func BenchmarkRecordIOReadRecordSizes(b *testing.B) {
 	}
 }
 
+func BenchmarkRecordIOReadInto(b *testing.B) {
+	for _, c := range benchCompressionTypes {
+		for _, size := range benchRecordSizes {
+			path, _, fileSize := writeBenchFile(b, size, c.comp)
+			for _, mode := range []string{"readnext", "readnextinto"} {
+				b.Run(fmt.Sprintf("%s/%d/%s", c.name, size, mode), func(b *testing.B) {
+					b.SetBytes(fileSize)
+					b.ReportAllocs()
+					var buf []byte
+					b.ResetTimer()
+					for n := 0; n < b.N; n++ {
+						b.StopTimer()
+						dropPageCache(b, path)
+						b.StartTimer()
+
+						reader, err := recordio.NewFileReaderWithPath(path)
+						require.NoError(b, err)
+						require.NoError(b, reader.Open())
+						for {
+							if mode == "readnext" {
+								_, err = reader.ReadNext()
+							} else {
+								buf, err = reader.(recordio.ReaderIntoI).ReadNextInto(buf[:0])
+							}
+							if errors.Is(err, io.EOF) {
+								break
+							}
+							require.NoError(b, err)
+						}
+						require.NoError(b, reader.Close())
+					}
+				})
+			}
+		}
+	}
+}
+
 func BenchmarkRecordIOSkipNext(b *testing.B) {
 	for _, size := range benchRecordSizes {
 		b.Run(fmt.Sprintf("none/%d", size), func(b *testing.B) {

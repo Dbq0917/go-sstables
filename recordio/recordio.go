@@ -83,9 +83,25 @@ type WriterI interface {
 type ReaderI interface {
 	OpenClosableI
 	// ReadNext reads the next record, EOF error when it reaches the end signalled by (nil, io.EOF). It can be wrapped however, so always check using errors.Is(err, io.EOF).
+	// The returned slice is owned by the caller. The reader never retains or reuses it, so it remains readable after
+	// subsequent reads, after Close, and when it is passed to another goroutine. The caller may modify it.
 	ReadNext() ([]byte, error)
 	// SkipNext skips the next record, EOF error when it reaches the end signalled by io.EOF as the error. It can be wrapped however, so always check using errors.Is(err, io.EOF).
 	SkipNext() error
+}
+
+// ReaderIntoI is a ReaderI that can read into a caller-owned buffer. This avoids the allocation of ReadNext when the
+// same buffer is reused for sequential scans.
+type ReaderIntoI interface {
+	ReaderI
+	// ReadNextInto is like ReadNext, but writes the record into buf when buf has enough capacity. The returned slice
+	// aliases buf in that case, otherwise it is a newly allocated slice. Empty records return a non-nil empty slice,
+	// nil records return nil.
+	//
+	// The reader never retains the returned slice and never shares it between calls. It is safe to pass the result to
+	// another goroutine, provided the caller does not pass buf to ReadNextInto again until that goroutine is done with
+	// it. Reusing buf overwrites the previous result.
+	ReadNextInto(buf []byte) ([]byte, error)
 }
 
 // ReadAtI implementors must make their implementation thread-safe
@@ -95,13 +111,38 @@ type ReadAtI interface {
 
 	// ReadNextAt reads the next record at the given offset, EOF error when it reaches the end signalled by (nil, io.EOF).
 	// It can be wrapped however, so always check using errors.Is(err, io.EOF). Implementation must be thread-safe.
+	// The returned slice is owned by the caller and is never shared with another call.
 	ReadNextAt(offset uint64) ([]byte, error)
 
 	// SeekNext reads the next full record that comes after the provided offset. The main difference to ReadNextAt is
 	// that this function seeks to the next record marker, whereas ReadNextAt always needs to be pointed to the start of
 	// the record.
 	// This function returns any io related error, for example io.EOF, or a wrapped equivalent, when the end is reached.
+	// The returned slice is owned by the caller and is never shared with another call.
 	SeekNext(offset uint64) (uint64, []byte, error)
+}
+
+// ReadAtIntoI is a ReadAtI that can read into a caller-owned buffer. It is safe for concurrent use as long as every
+// concurrent call passes a distinct buf.
+type ReadAtIntoI interface {
+	ReadAtI
+	// ReadNextAtInto is like ReadNextAt, but writes the record into buf when buf has enough capacity. The returned
+	// slice aliases buf in that case, otherwise it is a newly allocated slice. Empty records return a non-nil empty
+	// slice, nil records return nil.
+	//
+	// The reader never retains the returned slice and never shares it between calls. Reusing buf overwrites the
+	// previous result, so the caller must not pass the same buf to concurrent calls.
+	ReadNextAtInto(offset uint64, buf []byte) ([]byte, error)
+}
+
+// ReadAtViewI is a ReadAtI that can return uncompressed records as read-only views into its backing storage.
+type ReadAtViewI interface {
+	ReadAtI
+	// ReadNextAtView is like ReadNextAt, but returns an uncompressed record as a view into the reader's backing storage.
+	// The view is read-only, must not be modified, and is only valid until Close. Different offsets return distinct
+	// ranges, so views may be passed to other goroutines while the reader remains open. Compressed records are
+	// decompressed and returned as newly allocated slices.
+	ReadNextAtView(offset uint64) ([]byte, error)
 }
 
 type ReaderWriterCloserFactory interface {

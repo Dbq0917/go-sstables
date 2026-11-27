@@ -75,7 +75,10 @@ files with `ReadNext` (`FileReader`) and `ReadNextAt` (`MMapReader`), from front
 | 1 KB        | 1400 MB/s    | 1062 MB/s | 854 MB/s  | 159 MB/s | 2120 MB/s    | 2114 MB/s | 1296 MB/s | 172 MB/s |
 | 64 KB       | 1791 MB/s    | 1673 MB/s | 1668 MB/s | 176 MB/s | 2438 MB/s    | 2411 MB/s | 2204 MB/s | 188 MB/s |
 
-Every record read allocates its returned slice, compression doesn't add further allocations.
+`ReadNext` returns a newly allocated, caller-owned slice. For sequential scans that can reuse one buffer,
+`ReadNextInto` avoids that allocation; `BenchmarkRecordIOReadInto` compares both modes. Compression may still use the
+reader's internal scratch buffer for the compressed bytes, but the decompressed result is written directly into the
+caller's buffer.
 
 ### Skipping and seeking
 

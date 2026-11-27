@@ -117,39 +117,85 @@ func (r *MMapReader) ReadNextAt(offset uint64) ([]byte, error) {
 	}
 }
 
+// ReadNextAtInto is like ReadNextAt, but writes the record into buf when buf has enough capacity. The returned slice
+// aliases buf in that case, otherwise it is newly allocated. Distinct concurrent calls must pass distinct buffers.
+func (r *MMapReader) ReadNextAtInto(offset uint64, buf []byte) ([]byte, error) {
+	if !r.open || r.closed {
+		return nil, fmt.Errorf("reader at '%s' was either not opened yet or is closed already", r.path)
+	}
+
+	if r.header.fileVersion != Version4 {
+		record, err := r.ReadNextAt(offset)
+		if err != nil || record == nil {
+			return record, err
+		}
+		dst := growRecordBuffer(buf, uint64(len(record)))
+		copy(dst, record)
+		return dst, nil
+	}
+
+	payload, payloadSizeUncompressed, recordNil, err := r.payloadAtV4(offset)
+	if err != nil || recordNil {
+		return nil, err
+	}
+
+	if r.header.compressor != nil {
+		decompressedRecord, err := r.header.compressor.DecompressWithBuf(payload, growRecordBuffer(buf, payloadSizeUncompressed))
+		if err != nil {
+			return nil, fmt.Errorf("failed decompressing record at offset %d in mmap reader for '%s': %w", offset, r.path, err)
+		}
+		if decompressedRecord == nil && payloadSizeUncompressed == 0 {
+			return []byte{}, nil
+		}
+		return decompressedRecord, nil
+	}
+
+	dst := growRecordBuffer(buf, uint64(len(payload)))
+	copy(dst, payload)
+	return dst, nil
+}
+
+// ReadNextAtView returns an uncompressed record as a view directly into the memory-mapped file. The view is read-only
+// and valid until Close. Different offsets return distinct, non-overlapping ranges, so views can be passed to other
+// goroutines while the reader stays open. Use ReadNextAt or ReadNextAtInto if the bytes need to outlive the reader or
+// must be modified.
+//
+// Compressed records cannot be viewed without decompressing them, so they are returned as newly allocated slices.
+func (r *MMapReader) ReadNextAtView(offset uint64) ([]byte, error) {
+	if !r.open || r.closed {
+		return nil, fmt.Errorf("reader at '%s' was either not opened yet or is closed already", r.path)
+	}
+
+	if r.header.fileVersion != Version4 {
+		return r.ReadNextAt(offset)
+	}
+
+	payload, payloadSizeUncompressed, recordNil, err := r.payloadAtV4(offset)
+	if err != nil || recordNil {
+		return nil, err
+	}
+
+	if r.header.compressor != nil {
+		decompressedRecord, err := r.header.compressor.DecompressWithBuf(payload, make([]byte, payloadSizeUncompressed))
+		if err != nil {
+			return nil, fmt.Errorf("failed decompressing record at offset %d in mmap reader for '%s': %w", offset, r.path, err)
+		}
+		if decompressedRecord == nil {
+			return []byte{}, nil
+		}
+		return decompressedRecord, nil
+	}
+
+	// Capping capacity prevents append from writing into the mapping, but callers still must not modify the bytes.
+	return payload[:len(payload):len(payload)], nil
+}
+
 // readNextAtV4 decodes directly from the mapped memory, which saves the intermediate copies into pooled buffers.
 func readNextAtV4(r *MMapReader, offset uint64) ([]byte, error) {
-	data := r.mmapReaderSlice
-	if offset >= uint64(len(data)) {
-		if offset == uint64(len(data)) {
-			return nil, io.EOF
-		}
-		// keep the same error the mmap.ReaderAt would return
-		return nil, fmt.Errorf("ReadNextAt failed reading at offset %d in mmap reader for '%s': %w",
-			offset, r.path, fmt.Errorf("mmap: invalid ReadAt offset %d", offset))
+	payload, payloadSizeUncompressed, recordNil, err := r.payloadAtV4(offset)
+	if err != nil || recordNil {
+		return nil, err
 	}
-
-	headerEnd := min(offset+RecordHeaderV4MaxSizeBytes, uint64(len(data)))
-	payloadSizeUncompressed, payloadSizeCompressed, recordNil, headerLen, err := readRecordHeaderV4FromSlice(data[offset:headerEnd])
-	if err != nil {
-		return nil, fmt.Errorf("failed reading record header at offset %d in mmap reader for '%s': %w", offset, r.path, err)
-	}
-
-	if recordNil {
-		return nil, nil
-	}
-
-	expectedBytesRead := payloadSizeUncompressed
-	if r.header.compressor != nil {
-		expectedBytesRead = payloadSizeCompressed
-	}
-
-	payloadStart := offset + uint64(headerLen)
-	if expectedBytesRead > uint64(len(data))-payloadStart {
-		// SeekNext relies on io.EOF to continue searching past partial records
-		return nil, fmt.Errorf("failed reading record at offset %d in mmap reader for '%s': %w", offset, r.path, io.EOF)
-	}
-	payload := data[payloadStart : payloadStart+expectedBytesRead]
 
 	if r.header.compressor != nil {
 		decompressedRecord, err := r.header.compressor.DecompressWithBuf(payload, make([]byte, payloadSizeUncompressed))
@@ -164,6 +210,40 @@ func readNextAtV4(r *MMapReader, offset uint64) ([]byte, error) {
 
 	// the mapped memory must never leak to the caller, hence the copy
 	return bytes.Clone(payload), nil
+}
+
+func (r *MMapReader) payloadAtV4(offset uint64) (payload []byte, payloadSizeUncompressed uint64, recordNil bool, err error) {
+	data := r.mmapReaderSlice
+	if offset >= uint64(len(data)) {
+		if offset == uint64(len(data)) {
+			return nil, 0, false, io.EOF
+		}
+		// keep the same error the mmap.ReaderAt would return
+		return nil, 0, false, fmt.Errorf("ReadNextAt failed reading at offset %d in mmap reader for '%s': %w",
+			offset, r.path, fmt.Errorf("mmap: invalid ReadAt offset %d", offset))
+	}
+
+	headerEnd := min(offset+RecordHeaderV4MaxSizeBytes, uint64(len(data)))
+	payloadSizeUncompressed, payloadSizeCompressed, recordNil, headerLen, err := readRecordHeaderV4FromSlice(data[offset:headerEnd])
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("failed reading record header at offset %d in mmap reader for '%s': %w", offset, r.path, err)
+	}
+
+	if recordNil {
+		return nil, payloadSizeUncompressed, true, nil
+	}
+
+	expectedBytesRead := payloadSizeUncompressed
+	if r.header.compressor != nil {
+		expectedBytesRead = payloadSizeCompressed
+	}
+
+	payloadStart := offset + uint64(headerLen)
+	if expectedBytesRead > uint64(len(data))-payloadStart {
+		// SeekNext relies on io.EOF to continue searching past partial records
+		return nil, 0, false, fmt.Errorf("failed reading record at offset %d in mmap reader for '%s': %w", offset, r.path, io.EOF)
+	}
+	return data[payloadStart : payloadStart+expectedBytesRead], payloadSizeUncompressed, false, nil
 }
 
 func readNextAtV1(r *MMapReader, offset uint64) ([]byte, error) {
